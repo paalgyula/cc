@@ -1,0 +1,6 @@
+{
+    "go.toolsEnvVars": {
+        "GOROOT": "/home/paalgyula/.cache/tinygo/goroot-c3a29f4f0d530b273734726c0289c0af682aba9c43d73b67ed84a5504cfe2b5a/",
+        // "GOFLAGS": "-tags=linux,tinygo,gc.conservative,scheduler.tasks"
+    }
+}
