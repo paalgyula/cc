@@ -61,7 +61,7 @@ func findShell() string {
 
 func createShell(conn io.ReadWriter) {
 	subProcess := exec.Command(findShell())
-	subProcess.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// subProcess.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	subProcess.Stdin = conn
 	subProcess.Stdout = conn
