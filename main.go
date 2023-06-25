@@ -8,10 +8,15 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
+	"syscall"
+	"time"
 
 	"github.com/paalgyula/cc/config"
 	"github.com/paalgyula/cc/pkg/connection"
+)
+
+var (
+	ErrNoRemote = errors.New("R is not configured")
 )
 
 func resolveRemoteFromName(name string) (string, error) {
@@ -56,63 +61,25 @@ func findShell() string {
 
 func createShell(conn io.ReadWriter) {
 	subProcess := exec.Command(findShell())
+	subProcess.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
-	in, err := subProcess.StdinPipe()
-	if err != nil {
-		config.Info("stdin pipe error: %v", err)
+	subProcess.Stdin = conn
+	subProcess.Stdout = conn
+	subProcess.Stderr = conn
+
+	// Start the command
+	if err := subProcess.Start(); err != nil {
+		fmt.Println("Failed to start command:", err)
+		return
 	}
 
-	processOut, err := subProcess.StdoutPipe()
-	if err != nil {
-		config.Info("%v", err)
-	}
+	h, _ := os.Hostname()
+	fmt.Fprintf(conn, "# CC connected %s\n", h)
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Process output stream
-	go func() {
-		defer wg.Done()
-		io.Copy(conn, processOut)
-		processOut.Close()
-	}()
-
-	// Process input stream
-	go func() {
-		defer wg.Done()
-		defer in.Close()
-
-		r := make([]byte, 1)
-		for {
-			_, err := conn.Read(r)
-
-			fmt.Print(string(r))
-
-			if err != nil {
-				if err != io.EOF {
-					config.Info("read error: %v", err)
-				}
-
-				break
-			}
-
-			_, _ = in.Write(r)
-		}
-	}()
-
-	config.Info("streams opened, bridging!")
-
-	subProcess.Run()
-
-	wg.Wait()
-	fmt.Println("process ended")
-
-	os.Exit(1)
+	subProcess.Wait()
 }
 
-func main() {
-	config.Info("Starting CC")
-
+func resolveRemote() error {
 	if config.Remote == "" {
 		config.Remote = os.Getenv("R")
 
@@ -122,18 +89,44 @@ func main() {
 	}
 
 	if config.Remote == "" {
-		config.Info("R is not configured\n")
-		return
+		return ErrNoRemote
 	}
 
 	config.Info("R is set to: %s", config.Remote)
 
-	conn, err := connection.Connect(config.Remote)
-	if err != nil {
-		config.Info("error: %v\n", err)
-		os.Exit(1)
+	return nil
+}
+
+// Entry point
+func main() {
+	config.Info("Starting CC")
+
+	// Resolving remote address
+	if err := resolveRemote(); err != nil {
+		fmt.Println("error: ", err.Error())
+
+		return
 	}
 
-	defer conn.Close()
-	createShell(conn)
+	retry := 0
+
+	for {
+		time.Sleep(time.Second * time.Duration(retry*retry))
+
+		// Initiate connection to the remote
+		conn, err := connection.Connect(config.Remote)
+		if err != nil {
+			if errors.Is(err, syscall.ECONNREFUSED) {
+				retry++
+				continue
+			}
+
+			config.Info("error: %v\n", err)
+			os.Exit(1)
+		}
+
+		retry = 0
+		defer conn.Close()
+		createShell(conn)
+	}
 }
