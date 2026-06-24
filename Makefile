@@ -15,8 +15,15 @@ tinybuild:  ## Builds this project with tinygo's docker container
 	# docker run --rm -v $(PWD):/src -w /src tinygo/tinygo:0.28.1 tinygo build -o cc_tiny -tags "netgo tiny" -gc=leaking -no-debug ./
 	docker run --rm -v $(PWD):/src -w /src tinygo/tinygo:0.28.1 tinygo build -o cc_tiny -tags tiny ./
 
+.PHONY: downloader
+downloader:
+	rm -f download
+	gcc downloader/download.c -o download
+	strip download
+	upx -9 download
+
 cc: ## Makes the cc binary for linux
 	set -e
-	GOOS=linux ARCH=x64 go build -trimpath -tags netgo,nodebug -ldflags=$(LDFLAGS) -o cc .
+	GOOS=linux GOARCH=amd64 go build -trimpath -tags netgo,nodebug -ldflags=$(LDFLAGS) -o cc .
 	upx -9 --no-backup cc
 	ls -lah cc

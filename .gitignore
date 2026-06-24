@@ -1,4 +1,9 @@
 cc
 bin
+cc_tiny
+cc.exe
 
 dist/
+download
+*.zip
+*.tar.gz
